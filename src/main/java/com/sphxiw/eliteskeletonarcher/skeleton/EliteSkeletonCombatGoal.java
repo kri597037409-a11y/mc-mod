@@ -47,6 +47,7 @@ public final class EliteSkeletonCombatGoal extends Goal {
     private static final double LOW_HEALTH_RATIO = 0.45D;
     private static final double SAFE_HEAL_DISTANCE_SQR = 169.0D;
     private static final double CLOSE_SPLASH_DISTANCE_SQR = 64.0D;
+    private static final double DEFENSIVE_MELEE_RANGE_SQR = 6.25D;
     private static final double OPENING_INVISIBILITY_CHANCE = 0.14D;
     private static final double LOW_HEALTH_UTILITY_POTION_CHANCE = 0.12D;
     private static final double CLOSE_SPLASH_CHANCE = 0.22D;
@@ -165,6 +166,7 @@ public final class EliteSkeletonCombatGoal extends Goal {
         if (this.shouldRetreat()) {
             this.switchToBow();
             this.retreatFromTarget(target, distanceSqr, canSeeTarget);
+            this.tryShootBow(target, canSeeTarget, RANGED_COOLDOWN_TICKS + 8);
             return;
         }
 
@@ -173,8 +175,7 @@ public final class EliteSkeletonCombatGoal extends Goal {
         }
 
         if (distanceSqr <= this.meleeRangeSqr) {
-            this.switchToMelee();
-            this.closeAndStrike(target, distanceSqr, canSeeTarget);
+            this.handleCloseTarget(target, distanceSqr, canSeeTarget);
             return;
         }
 
@@ -182,40 +183,34 @@ public final class EliteSkeletonCombatGoal extends Goal {
         this.keepRangedAdvantage(target, distanceSqr, canSeeTarget);
     }
 
-    private void closeAndStrike(LivingEntity target, double distanceSqr, boolean canSeeTarget) {
-        this.requestMoveTo(target.position(), this.speedModifier * 1.2D, 4, 1.0D);
-
-        if (canSeeTarget && this.attackCooldown <= 0 && distanceSqr <= this.getAttackReachSqr(target)) {
+    private void handleCloseTarget(LivingEntity target, double distanceSqr, boolean canSeeTarget) {
+        if (canSeeTarget && this.attackCooldown <= 0 && distanceSqr <= DEFENSIVE_MELEE_RANGE_SQR) {
+            this.switchToMelee();
             this.skeleton.swing(InteractionHand.MAIN_HAND);
             this.skeleton.doHurtTarget(target);
             this.attackCooldown = MELEE_COOLDOWN_TICKS;
         }
+
+        this.switchToBow();
+        this.retreatFromTarget(target, distanceSqr, canSeeTarget);
+        this.tryShootBow(target, canSeeTarget, RANGED_COOLDOWN_TICKS + 4);
     }
 
     private void keepRangedAdvantage(LivingEntity target, double distanceSqr, boolean canSeeTarget) {
-        if (this.tryMoveBehindNearbyMonster(target, false)) {
-            return;
-        }
+        boolean repositioned = this.tryMoveBehindNearbyMonster(target, false) || this.tryMoveToCover(target, canSeeTarget);
 
-        if (this.tryMoveToCover(target, canSeeTarget)) {
-            return;
-        }
-
-        if (distanceSqr < this.preferredMinSqr) {
+        if (!repositioned && distanceSqr < this.preferredMinSqr) {
             Vec3 away = DefaultRandomPos.getPosAway(this.skeleton, 12, 6, target.position());
             if (away != null) {
                 this.requestMoveTo(away, this.speedModifier * 1.15D, 8, 2.0D);
             }
-        } else if (distanceSqr > this.preferredMaxSqr || !canSeeTarget) {
+        } else if (!repositioned && (distanceSqr > this.preferredMaxSqr || !canSeeTarget)) {
             this.requestMoveTo(target.position(), this.speedModifier, 10, 2.0D);
-        } else {
+        } else if (!repositioned) {
             this.strafeAroundTarget(target);
         }
 
-        if (canSeeTarget && this.attackCooldown <= 0) {
-            this.shootGuaranteedArrow(target);
-            this.attackCooldown = RANGED_COOLDOWN_TICKS + this.skeleton.getRandom().nextInt(10);
-        }
+        this.tryShootBow(target, canSeeTarget, RANGED_COOLDOWN_TICKS);
     }
 
     private boolean tryMoveToCover(LivingEntity target, boolean canSeeTarget) {
@@ -475,10 +470,17 @@ public final class EliteSkeletonCombatGoal extends Goal {
         return true;
     }
 
-    private void shootGuaranteedArrow(LivingEntity target) {
+    private void tryShootBow(LivingEntity target, boolean canSeeTarget, int baseCooldown) {
+        if (canSeeTarget && this.attackCooldown <= 0) {
+            this.shootAccurateArrow(target);
+            this.attackCooldown = baseCooldown + this.skeleton.getRandom().nextInt(8);
+        }
+    }
+
+    private void shootAccurateArrow(LivingEntity target) {
         ItemStack bow = this.findBow();
         Arrow arrow = new Arrow(this.skeleton.level(), this.skeleton);
-        double damage = 4.0D;
+        double damage = 2.5D;
 
         int power = EnchantmentHelper.getItemEnchantmentLevel(Enchantments.POWER_ARROWS, bow);
         if (power > 0) {
@@ -492,13 +494,27 @@ public final class EliteSkeletonCombatGoal extends Goal {
 
         if (EnchantmentHelper.getItemEnchantmentLevel(Enchantments.FLAMING_ARROWS, bow) > 0) {
             arrow.setSecondsOnFire(100);
-            target.setSecondsOnFire(5);
         }
 
         arrow.setBaseDamage(damage);
+
+        Vec3 targetMotion = target.getDeltaMovement();
+        double dxBase = target.getX() - this.skeleton.getX();
+        double dzBase = target.getZ() - this.skeleton.getZ();
+        double horizontalDistance = Math.sqrt(dxBase * dxBase + dzBase * dzBase);
+        double leadTicks = Mth.clamp(horizontalDistance / 3.0D, 0.0D, 6.0D);
+        double predictedX = target.getX() + targetMotion.x * leadTicks;
+        double predictedY = target.getY() + target.getBbHeight() * 0.55D + targetMotion.y * leadTicks * 0.4D;
+        double predictedZ = target.getZ() + targetMotion.z * leadTicks;
+        double dx = predictedX - this.skeleton.getX();
+        double dy = predictedY - arrow.getY();
+        double dz = predictedZ - this.skeleton.getZ();
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+
         this.skeleton.swing(InteractionHand.MAIN_HAND);
         this.skeleton.playSound(SoundEvents.SKELETON_SHOOT, 1.0F, 1.0F / (this.skeleton.getRandom().nextFloat() * 0.4F + 0.8F));
-        target.hurt(this.skeleton.damageSources().arrow(arrow, this.skeleton), (float) damage);
+        arrow.shoot(dx, dy + horizontal * 0.14D, dz, 2.0F, 1.0F);
+        this.skeleton.level().addFreshEntity(arrow);
     }
 
     private void tryInteractWithNearbyBlocks() {
@@ -564,8 +580,4 @@ public final class EliteSkeletonCombatGoal extends Goal {
         return ItemStack.EMPTY;
     }
 
-    private double getAttackReachSqr(LivingEntity target) {
-        double width = this.skeleton.getBbWidth() * 2.0F;
-        return width * width + target.getBbWidth();
-    }
 }
