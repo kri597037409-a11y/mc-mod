@@ -1,0 +1,1 @@
+public class T{public static void main(String[]a)throws Exception{var u=new java.net.URI(a[0]).toURL();var c=(java.net.HttpURLConnection)u.openConnection();c.setConnectTimeout(10000);c.setReadTimeout(10000);System.out.println(c.getResponseCode());System.out.println(c.getHeaderField("Content-Type"));}}
